@@ -1,9 +1,12 @@
-"""Threaded asyncio applications sharing a process-wide executor.
+"""Independent threaded asyncio applications sharing one Python runtime.
 
 ``UniteIO`` gives each application class one singleton instance, one daemon
 thread, and one asyncio event loop. All applications share the singleton
 ``UIOPool`` for synchronous callable work while coroutine work remains on the
-application's own loop.
+application's own loop. On free-threaded CPython, callbacks belonging to
+different loop threads can execute Python code in parallel when their workload
+permits it. Process-wide objects remain shared and require normal thread-safe
+access when mutable.
 
 Example:
     Define, start, submit work to, and stop an application::
@@ -20,7 +23,9 @@ Example:
         assert future.result() == "ready"
         service.stop()
 
-The package targets CPython free-threaded builds. Closing an application loop
+The package targets CPython free-threaded builds. Separate loops still provide
+scheduling isolation with the GIL enabled, but the GIL prevents parallel
+Python-bytecode execution between their threads. Closing an application loop
 uses a CPython-specific executor-detachment step so the shared pool remains
 available to other applications.
 """
@@ -133,7 +138,7 @@ class UIOPool(AdjustableThreadPoolExecutor, metaclass=UIOPoolMeta):
             max_workers: Maximum number of worker threads, or ``None`` to use
                 the standard executor default.
         """
-        _gil and warnings.warn("UniteIO is inteded to be used with free-threaded interpreter environments.")
+        _gil and warnings.warn("UniteIO is intended to be used with the GIL disabled.")
         super(UIOPool, self).__init__(max_workers=max_workers, thread_name_prefix="UIO:")
         self._apps = {}
         self._uio_shutdown_started = False
@@ -354,8 +359,11 @@ class UIOMeta(ABCMeta):
 class UniteIO(UIOArchetype, metaclass=UIOMeta):
     """Base class for singleton applications running dedicated asyncio loops.
 
-    Each concrete subclass owns one active daemon thread and event loop. The
-    subclass's asynchronous :meth:`__call__` method is scheduled automatically
+    Each concrete subclass owns one active daemon thread and event loop. On a
+    free-threaded CPython build, work on different application threads can run
+    in parallel while sharing process-wide state; mutable shared state must be
+    synchronized by the application. The subclass's asynchronous
+    :meth:`__call__` method is scheduled automatically
     during construction. Synchronous callables submitted through :meth:`submit`
     run on the shared :class:`UIOPool`; coroutines run on the application's
     loop.

@@ -2,7 +2,10 @@
 """Public package interface for UniteIO.
 
 The package exports :class:`UniteIO`, its shared :class:`UIOPool`, and the
-optional :class:`AdjustableThreadPoolExecutor` implementation.
+optional :class:`AdjustableThreadPoolExecutor` implementation. Each concrete
+application class owns an independent event-loop thread. Free-threaded CPython
+allows eligible work on those threads to execute in parallel while applications
+continue to share the same process and explicitly synchronized global state.
 
 Example:
     Create an application whose asynchronous entry point runs on its own
