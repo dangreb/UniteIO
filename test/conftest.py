@@ -1,7 +1,7 @@
 import pytest
 
-from uio import UIOPool
-from uio.uniteio import UIOMeta, UIOPoolMeta, UIOTask
+from uniteio import UIOPool
+from uniteio.uniteio import UIOMeta, UIOPoolMeta, UIOTask
 
 
 @pytest.fixture(autouse=True)
@@ -17,4 +17,3 @@ def clean_uio_state():
     # also keeps a failed construction from contaminating the next test.
     UIOMeta._instances.clear()
     UIOTask._coroarg.clear()
-

@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from uio import UniteIO, UIOPool
+from uniteio import UniteIO, UIOPool
 
 
 class FirstPoolApplication(UniteIO):

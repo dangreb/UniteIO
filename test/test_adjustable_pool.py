@@ -2,7 +2,7 @@ import threading
 
 import pytest
 
-from uio.adjustable_pool import AdjustableThreadPoolExecutor
+from uniteio.adjustable_pool import AdjustableThreadPoolExecutor
 
 
 def test_max_workers_can_be_increased():
@@ -65,4 +65,3 @@ def test_cannot_resize_after_shutdown():
 
     with pytest.raises(RuntimeError, match="after shutdown"):
         pool.set_max_workers(2)
-

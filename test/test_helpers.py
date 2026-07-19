@@ -1,7 +1,7 @@
 import asyncio
 import threading
 
-from uio import UniteIO
+from uniteio import UniteIO
 
 
 class HelperApplication(UniteIO):

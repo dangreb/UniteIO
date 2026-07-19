@@ -8,8 +8,8 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 project = "UniteIO"
-author = "dasgreb"
-copyright = "2026, dasgreb"
+author = "Danilo Greb Santos"
+copyright = "2026, Danilo Greb Santos"
 version = "0.1"
 release = "0.1"
 
@@ -32,4 +32,3 @@ exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
 
 html_theme = "sphinx_rtd_theme"
 html_static_path = []
-

@@ -4,7 +4,7 @@ API reference
 Applications and shared pool
 ----------------------------
 
-.. automodule:: uio.uniteio
+.. automodule:: uniteio.uniteio
    :members: UniteIO, UIOPool
    :member-order: bysource
    :show-inheritance:
@@ -12,8 +12,7 @@ Applications and shared pool
 Adjustable executor
 -------------------
 
-.. automodule:: uio.adjustable_pool
+.. automodule:: uniteio.adjustable_pool
    :members: AdjustableThreadPoolExecutor
    :member-order: bysource
    :show-inheritance:
-

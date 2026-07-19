@@ -4,7 +4,7 @@ import threading
 
 import pytest
 
-from uio import UniteIO
+from uniteio import UniteIO
 
 
 marker = contextvars.ContextVar("marker", default="default")

@@ -30,7 +30,7 @@ class AdjustableThreadPoolExecutor(ThreadPoolExecutor):
     Example:
         Increase a running executor from two workers to four::
 
-            from uio import AdjustableThreadPoolExecutor
+            from uniteio import AdjustableThreadPoolExecutor
 
             with AdjustableThreadPoolExecutor(max_workers=2) as pool:
                 old, new = pool.set_max_workers(4)

@@ -3,7 +3,7 @@ import threading
 
 import pytest
 
-from uio import UniteIO, UIOPool
+from uniteio import UniteIO, UIOPool
 
 
 class ConfiguredApplication(UniteIO):
@@ -121,4 +121,3 @@ def test_missing_uniteio_constructor_is_rejected():
 
     with pytest.raises(RuntimeError, match="super constructor"):
         MissingSuperApplication()
-

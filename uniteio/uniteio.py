@@ -9,7 +9,7 @@ Example:
     Define, start, submit work to, and stop an application::
 
         import asyncio
-        from uio import UniteIO
+        from uniteio import UniteIO
 
         class Service(UniteIO, prefix="SVC"):
             async def __call__(self):
@@ -43,7 +43,7 @@ from concurrent.futures import ThreadPoolExecutor, Future
 from abc import ABCMeta, abstractmethod
 from typing import Any, overload, Callable, ClassVar, Coroutine, Optional, Iterable, Self, final
 
-from uio.adjustable_pool import AdjustableThreadPoolExecutor
+from uniteio.adjustable_pool import AdjustableThreadPoolExecutor
 
 _gil = hasattr(sys, '_is_gil_enabled') and sys._is_gil_enabled()
 
@@ -117,7 +117,7 @@ class UIOPool(AdjustableThreadPoolExecutor, metaclass=UIOPoolMeta):
     Example:
         Submit synchronous work directly to the shared pool::
 
-            from uio import UIOPool
+            from uniteio import UIOPool
 
             pool = UIOPool(max_workers=4)
             assert pool.submit(sum, [1, 2, 3]).result() == 6
@@ -372,7 +372,7 @@ class UniteIO(UIOArchetype, metaclass=UIOMeta):
         Create an application, submit both kinds of work, and stop it::
 
             import asyncio
-            from uio import UniteIO
+            from uniteio import UniteIO
 
             class Processor(UniteIO, prefix="PROC"):
                 def __init__(self, endpoint):

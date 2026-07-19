@@ -9,7 +9,7 @@ Example:
     event-loop thread::
 
         import asyncio
-        from uio import UniteIO
+        from uniteio import UniteIO
 
         class Worker(UniteIO):
             async def __call__(self):
@@ -19,5 +19,5 @@ Example:
         worker.stop()
 """
 
-from uio.uniteio import *
-from uio.adjustable_pool import *
+from uniteio.uniteio import *
+from uniteio.adjustable_pool import *
