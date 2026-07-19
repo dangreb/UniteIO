@@ -1,0 +1,4 @@
+# Documentation build dependencies.
+Sphinx==9.1.0
+sphinx-rtd-theme==3.1.0
+
