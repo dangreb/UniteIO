@@ -9,6 +9,14 @@ Applications and shared pool
    :member-order: bysource
    :show-inheritance:
 
+Cross-loop event emitters
+-------------------------
+
+.. automodule:: uniteio.iter_emitter
+   :members: EmitIO, IterEmitter, OverflowPolicy, SlowConsumerError
+   :member-order: bysource
+   :show-inheritance:
+
 Adjustable executor
 -------------------
 

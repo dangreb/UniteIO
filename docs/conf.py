@@ -10,8 +10,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 project = "UniteIO"
 author = "Danilo Greb Santos"
 copyright = "2026, Danilo Greb Santos"
-version = "0.1"
-release = "0.1"
+version = "0.2"
+release = "0.2.0"
 
 extensions = [
     "sphinx.ext.autodoc",

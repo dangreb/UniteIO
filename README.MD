@@ -112,6 +112,60 @@ normal thread-safety measures such as locks.
 Calling `UIOPool().shutdown()` stops all registered applications before
 shutting down the shared executor.
 
+## Broadcast one connection to multiple loops
+
+`EmitIO` lets one application own a websocket connection and broadcast its
+events to applications on other UniteIO loops. Each consumer selects its own
+buffer capacity and overflow policy.
+
+```python
+from uniteio import EmitIO, OverflowPolicy, UniteIO
+
+
+class PriceFeed(EmitIO, emitter={
+    "buffer": 1024,
+    "overflow": OverflowPolicy.DISCONNECT,
+}):
+    def __init__(self, websocket):
+        super().__init__(websocket=websocket)
+
+    async def __call__(self):
+        try:
+            async for ticker in self.websocket:
+                self.emit(ticker)
+        finally:
+            self.close_emitter()
+
+
+class TickArchive(UniteIO):
+    async def __call__(self):
+        # Preserve every tick received after this iteration registers.
+        async for ticker in PriceFeed().with_buffer(None):
+            await database.insert_ticker(ticker)
+
+
+class ExitStrategy(UniteIO):
+    async def __call__(self):
+        # Keep only the latest pending price for TP/SL decisions.
+        async for ticker in PriceFeed().with_buffer(
+            1,
+            overflow=OverflowPolicy.DROP_OLDEST,
+        ):
+            await evaluate_take_profit_and_stop_loss(ticker)
+
+
+feed = PriceFeed(websocket=websocket)
+archive = TickArchive()
+strategy = ExitStrategy()
+```
+
+`IterEmitter` can also be used without an `EmitIO` owner. Emission is
+thread-safe, each subscription is bound to its own event loop, and
+`close(wait=True, timeout=...)` can synchronously wait for active subscriber
+buffers to drain. See the
+[emitter guide](https://uniteio.readthedocs.io/en/latest/emitters.html) for live
+subscription semantics, overflow policies, and shutdown behavior.
+
 ## Documentation
 
 The full guide and API reference are available at

@@ -26,14 +26,16 @@ Independent loops do not make shared state automatically thread-safe. Protect
 mutable objects with locks or another thread-safe coordination mechanism, just
 as you would with any multithreaded Python program.
 
-Start with the quick-start guide for a two-loop streaming example, then use the
-API reference for the complete class and method documentation.
+Start with the quick-start guide for a two-loop streaming example. The emitter
+guide shows how one websocket connection can broadcast to applications on
+separate loops, and the API reference documents the complete public interface.
 
 .. toctree::
    :maxdepth: 2
    :caption: Contents
 
    quickstart
+   emitters
    api
 
 Indices

@@ -1,10 +1,11 @@
 
 """Public package interface for UniteIO.
 
-The package exports :class:`UniteIO`, its shared :class:`UIOPool`, and the
-optional :class:`AdjustableThreadPoolExecutor` implementation. Each concrete
-application class owns an independent event-loop thread. Free-threaded CPython
-allows eligible work on those threads to execute in parallel while applications
+The package exports :class:`UniteIO`, the emitter-enabled :class:`EmitIO`, its
+shared :class:`UIOPool`, and the optional
+:class:`AdjustableThreadPoolExecutor` implementation. Each concrete application
+class owns an independent event-loop thread. Free-threaded CPython allows
+eligible work on those threads to execute in parallel while applications
 continue to share the same process and explicitly synchronized global state.
 
 Example:
@@ -23,4 +24,5 @@ Example:
 """
 
 from uniteio.uniteio import *
+from uniteio.iter_emitter import *
 from uniteio.adjustable_pool import *
