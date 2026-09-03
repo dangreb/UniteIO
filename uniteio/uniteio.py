@@ -672,16 +672,21 @@ class UniteIO(UIOArchetype, metaclass=UIOMeta):
 
 
     @overload
-    def submit(self, target: Coroutine, /, *, name: Optional[str] = None, eager: bool = False) -> Future:
+    def submit(self, target: Coroutine, /, *, name: Optional[str] = None, context: Context, eager: bool = False, **kwargs) -> Future:
         """Type signature for submitting one pre-created coroutine."""
         ...
 
     @overload
-    def submit(self, target: Iterable[Coroutine], /, *, name: Optional[str] = None, eager: bool = False) -> Future:
+    def submit(self, target: Iterable[Coroutine], /, *, name: Optional[str] = None, context: Context, eager: bool = False, **kwargs) -> Future:
         """Type signature for submitting an iterable of coroutines."""
         ...
 
-    def submit(self, target: Callable, /, *args, name: Optional[str] = None, context: Context = None, eager: bool = False, **kwargs) -> Future:
+    @overload
+    def submit(self, target: Callable, /, *, name: Optional[str] = None, context: Context = None, eager: bool = False, **kwargs) -> Future:
+        """Type signature for submitting a callable to the executor."""
+        ...
+
+    def submit(self, target, /, *, name: Optional[str] = None, context: Context = None, eager: bool = False, **kwargs) -> Future:
         """Submit coroutine or synchronous work to the appropriate runtime.
 
         Coroutine objects and coroutine functions execute on this application's
@@ -738,9 +743,9 @@ class UniteIO(UIOArchetype, metaclass=UIOMeta):
         elif asyncio.iscoroutine(target):
             coro = target
         elif inspect.iscoroutinefunction(target):
-            coro = target(*args, **kwargs)
+            coro = target(**kwargs)
         elif callable(target):
-            return self.pool.submit(target, *args, **kwargs)
+            return self.pool.submit(target, **kwargs)
         else:
             raise TypeError("Target must be a coroutine, coroutine function or callable")
         UIOTask.coroargs(coro, name=tname, context=context, eager_start=eager)
