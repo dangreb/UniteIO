@@ -46,7 +46,9 @@ from threading import Thread, Event, RLock, current_thread
 from concurrent.futures import ThreadPoolExecutor, Future
 
 from abc import ABCMeta, abstractmethod
-from typing import Any, overload, Callable, ClassVar, Coroutine, Optional, Iterable, Self, final
+from typing import Any, overload, Callable, ClassVar, Coroutine, Optional, Iterable, Self
+
+# from typer.models import NoneType
 
 from uniteio.adjustable_pool import AdjustableThreadPoolExecutor
 
@@ -96,6 +98,7 @@ class UIOArchetype(Thread, metaclass=ABCMeta):
 
     _wait: Event
     _kwargs: dict[str, Any]
+
 
     def wait(self) -> None:
         """Block until the application's event-loop thread reports readiness."""
@@ -317,6 +320,12 @@ class UIOMeta(ABCMeta):
     _instances: dict[type[UIOArchetype], UIOArchetype] = {}
     _lock = RLock()
 
+    def __new__(
+            mcls, name: str, bases: tuple[type, ...], namespace: dict[str, Any], /, **kwargs: Any
+        ):
+        """Create a new application subclass."""
+        return super().__new__(mcls, name, bases, namespace, **kwargs)
+
     def __call__(cls, **kwargs):
         """Return the active instance of an application subclass.
 
@@ -432,6 +441,7 @@ class UniteIO(UIOArchetype, metaclass=UIOMeta):
                     async def __call__(self):
                         ...
         """
+        super().__init_subclass__(**kwargs)
         cls._appname = name or cls.__name__
         cls._prefix = prefix or "".join(cl for cl in cls.__name__ if cl in ascii_uppercase) or cls._appname
         """Ensure no varargs"""
@@ -453,7 +463,6 @@ class UniteIO(UIOArchetype, metaclass=UIOMeta):
                         " %s with constructor %s doesn't "
                         " follow this convention." % (cls, init_signature)
                     )
-        pass
 
 
     def taskname(self) -> str:

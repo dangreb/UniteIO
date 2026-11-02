@@ -13,7 +13,7 @@ Cross-loop event emitters
 -------------------------
 
 .. automodule:: uniteio.iter_emitter
-   :members: EmitIO, IterEmitter, OverflowPolicy, SlowConsumerError
+   :members: EmitterOptions, EmitIO, IterEmitter, OverflowPolicy, SlowConsumerError, SubscriptionCriteria, SubscriptionOptions
    :member-order: bysource
    :show-inheritance:
 

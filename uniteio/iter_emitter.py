@@ -16,25 +16,34 @@ from __future__ import annotations
 import asyncio
 
 from collections import deque
-from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass, field
+from collections.abc import AsyncIterator, Callable, Hashable, Iterable, Mapping
+from dataclasses import dataclass, field, replace
 from enum import Enum, auto
-from threading import Condition, Lock, RLock
-from typing import Any, ClassVar, Generic, TypeVar
+from threading import Condition, RLock
+from typing import Any, ClassVar, Generic, Self, TypeVar, cast
 
 from uniteio.uniteio import UniteIO
 
 
+
+
 __all__ = [
+    "EmitterOptions",
     "EmitIO",
     "IterEmitter",
     "OverflowPolicy",
     "SlowConsumerError",
+    "SubscriptionCriteria",
+    "SubscriptionOptions",
 ]
 
 
 T = TypeVar("T")
+K = TypeVar("K", bound=Hashable)
 _EMITTER_UNSET = object()
+_OPTION_UNSET = object()
+
+RouteExtractor = Callable[[T], Hashable | Iterable[Hashable]]
 
 
 class OverflowPolicy(Enum):
@@ -54,14 +63,89 @@ class SlowConsumerError(RuntimeError):
     """Raised in a subscriber disconnected because its buffer filled."""
 
 
+@dataclass(frozen=True, slots=True)
+class SubscriptionOptions:
+    """Delivery policy assigned to one asynchronous subscription.
+
+    ``None`` for :attr:`buffer` selects an unbounded queue.  Instances are
+    immutable so an emitter can safely share its defaults across threads.
+    """
+
+    buffer: int | None = 1_024
+    overflow: OverflowPolicy = OverflowPolicy.DISCONNECT
+
+    def __post_init__(self) -> None:
+        if self.buffer is not None:
+            if not isinstance(self.buffer, int) or isinstance(self.buffer, bool):
+                raise TypeError("buffer must be an int or None")
+            if self.buffer < 1:
+                raise ValueError("buffer must be positive or None")
+        if not isinstance(self.overflow, OverflowPolicy):
+            raise TypeError("overflow must be an OverflowPolicy")
+
+    def with_overrides(self, **changes: object) -> Self:
+        """Return a validated copy with the supplied fields replaced."""
+        return replace(self, **changes)
+
+
+@dataclass(frozen=True, slots=True)
+class SubscriptionCriteria(Generic[K]):
+    """Keys a subscription wants and does not want from a routed emitter.
+
+    ``wanted=None`` selects every route key, while an empty ``wanted`` set
+    selects none.  A payload is selected when it shares any wanted key and no
+    unwanted key.  Routers can expose composite keys for conjunctions.
+    """
+
+    wanted: frozenset[K] | None = None
+    unwanted: frozenset[K] = field(default_factory=frozenset)
+
+    def __post_init__(self) -> None:
+        self._validate_keys("wanted", self.wanted)
+        self._validate_keys("unwanted", self.unwanted)
+
+    def matches(self, route_keys: frozenset[Hashable]) -> bool:
+        """Return whether a payload with ``route_keys`` belongs here."""
+        return (
+            (self.wanted is None or bool(self.wanted.intersection(route_keys)))
+            and not self.unwanted.intersection(route_keys)
+        )
+
+    @staticmethod
+    def _validate_keys(
+        name: str,
+        keys: frozenset[Hashable] | None,
+    ) -> None:
+        if keys is not None and not isinstance(keys, frozenset):
+            raise TypeError(f"{name} must be a frozenset or None")
+        if keys is not None and not all(isinstance(key, Hashable) for key in keys):
+            raise TypeError(f"{name} keys must be hashable")
+
+
+@dataclass(frozen=True, slots=True)
+class EmitterOptions(Generic[T]):
+    """Immutable configuration for an emitter and its default subscription."""
+
+    subscription: SubscriptionOptions = field(
+        default_factory=SubscriptionOptions,
+    )
+    router: RouteExtractor[T] | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.subscription, SubscriptionOptions):
+            raise TypeError("subscription must be a SubscriptionOptions")
+        if self.router is not None and not callable(self.router):
+            raise TypeError("router must be callable or None")
+
+
 @dataclass(eq=False, slots=True)
 class _Subscriber(Generic[T]):
     """Subscription state mutated only by its owning event-loop thread."""
 
     emitter: IterEmitter[T]
     loop: asyncio.AbstractEventLoop
-    buffer: int | None
-    overflow: OverflowPolicy
+    options: SubscriptionOptions
+    criteria: SubscriptionCriteria[Hashable] | None
     ready: asyncio.Event = field(default_factory=asyncio.Event)
     items: deque[T] = field(default_factory=deque)
     active: bool = True
@@ -73,17 +157,19 @@ class _Subscriber(Generic[T]):
         if not self.active or self.closed:
             return
 
-        if self.buffer is not None and len(self.items) >= self.buffer:
-            self.emitter._record_drop()
-
-            if self.overflow is OverflowPolicy.DROP_OLDEST:
+        if (
+            self.options.buffer is not None
+            and len(self.items) >= self.options.buffer
+        ):
+            if self.options.overflow is OverflowPolicy.DROP_OLDEST:
                 self.items.popleft()
-            elif self.overflow is OverflowPolicy.DROP_NEWEST:
+            elif self.options.overflow is OverflowPolicy.DROP_NEWEST:
                 return
             else:
                 self.items.clear()
                 self.error = SlowConsumerError(
-                    f"subscriber buffer reached its {self.buffer}-item limit"
+                    "subscriber buffer reached its "
+                    f"{self.options.buffer}-item limit"
                 )
                 self.active = False
                 self.emitter._discard(self)
@@ -102,36 +188,57 @@ class _Subscriber(Generic[T]):
 
 
 class IterEmitter(Generic[T]):
-    """Broadcast values to async iterations running on independent loops.
+    """Broadcast or route values to async iterations on independent loops.
 
     Args:
-        buffer: Default maximum queued values per subscriber. ``None`` selects
-            an unbounded buffer.
-        overflow: Default policy applied when a subscriber buffer is full.
+        options: Default delivery policy for new subscriptions.
+        buffer: Compatibility shortcut for ``options.buffer``.
+        overflow: Compatibility shortcut for ``options.overflow``.
+        router: Pure callable that returns one key or an iterable of keys for
+            each payload.  Supplying it enables :class:`SubscriptionCriteria`.
 
     Iterations receive values emitted only after they register.  Concurrent
     calls to :meth:`emit` are serialized so every subscriber observes the same
     producer order.  Individual consumers can override the default buffering
-    behavior through :meth:`with_buffer`.
+    behavior through :meth:`subscribe` or :meth:`with_buffer`.
     """
 
     def __init__(
         self,
+        options: SubscriptionOptions | None = None,
         *,
-        buffer: int | None = 1_024,
-        overflow: OverflowPolicy = OverflowPolicy.DISCONNECT,
+        buffer: int | None | object = _OPTION_UNSET,
+        overflow: OverflowPolicy | object = _OPTION_UNSET,
+        router: RouteExtractor[T] | None = None,
     ) -> None:
-        self._validate_subscription_options(buffer, overflow)
+        if options is not None and (
+            buffer is not _OPTION_UNSET or overflow is not _OPTION_UNSET
+        ):
+            raise TypeError(
+                "options cannot be combined with buffer or overflow"
+            )
+        if options is not None and not isinstance(options, SubscriptionOptions):
+            raise TypeError("options must be a SubscriptionOptions or None")
+        if router is not None and not callable(router):
+            raise TypeError("router must be callable or None")
 
-        self._buffer = buffer
-        self._overflow = overflow
+        if options is None:
+            changes: dict[str, object] = {}
+            if buffer is not _OPTION_UNSET:
+                changes["buffer"] = buffer
+            if overflow is not _OPTION_UNSET:
+                changes["overflow"] = overflow
+            options = SubscriptionOptions().with_overrides(**changes)
+
+        self._options = options
+        self._router = router
         self._lock = RLock()
-        self._stats_lock = Lock()
         self._changed = Condition(self._lock)
         self._subscribers: set[_Subscriber[T]] = set()
+        self._subscribers_by_key: dict[Hashable, set[_Subscriber[T]]] = {}
+        self._wildcard_subscribers: set[_Subscriber[T]] = set()
+        self._criteria_subscribers: set[_Subscriber[T]] = set()
         self._closed = False
-        self._emitted = 0
-        self._dropped = 0
 
     @property
     def closed(self) -> bool:
@@ -140,32 +247,20 @@ class IterEmitter(Generic[T]):
             return self._closed
 
     @property
-    def emitted_count(self) -> int:
-        """Number of calls to :meth:`emit` accepted before closure."""
-        with self._lock:
-            return self._emitted
-
-    @property
-    def dropped_count(self) -> int:
-        """Total values dropped or rejected across all subscribers."""
-        with self._stats_lock:
-            return self._dropped
-
-    @property
-    def subscriber_count(self) -> int:
-        """Number of currently registered iterations."""
-        with self._lock:
-            return len(self._subscribers)
+    def options(self) -> SubscriptionOptions:
+        """Return the immutable default delivery policy."""
+        return self._options
 
     def emit(self, payload: T) -> int:
-        """Schedule ``payload`` for every subscriber.
+        """Schedule ``payload`` for every matching subscriber.
 
         Args:
-            payload: Value delivered to every iteration registered when this
-                method linearizes under the emitter lock.
+            payload: Value routed to iterations registered when this method
+                linearizes under the emitter lock.
 
         Returns:
-            Number of subscriber loops on which delivery was scheduled.
+            Number of matching subscriber loops on which delivery was
+            scheduled.
 
         Raises:
             RuntimeError: If the emitter has already closed.
@@ -174,10 +269,9 @@ class IterEmitter(Generic[T]):
             if self._closed:
                 raise RuntimeError("cannot emit after close")
 
-            self._emitted += 1
             delivered = 0
 
-            for subscriber in tuple(self._subscribers):
+            for subscriber in self._matching_subscribers(payload):
                 try:
                     subscriber.loop.call_soon_threadsafe(
                         subscriber.deliver,
@@ -186,8 +280,7 @@ class IterEmitter(Generic[T]):
                 except RuntimeError:
                     # The owner loop closed without allowing the iterator's
                     # finally block to deregister.
-                    self._subscribers.discard(subscriber)
-                    self._changed.notify_all()
+                    self._discard_locked(subscriber)
                 else:
                     delivered += 1
 
@@ -239,7 +332,7 @@ class IterEmitter(Generic[T]):
                     try:
                         subscriber.loop.call_soon_threadsafe(subscriber.finish)
                     except RuntimeError:
-                        self._subscribers.discard(subscriber)
+                        self._discard_locked(subscriber)
 
                 self._changed.notify_all()
 
@@ -278,7 +371,37 @@ class IterEmitter(Generic[T]):
 
     def __aiter__(self) -> AsyncIterator[T]:
         """Create a subscription using this emitter's default policy."""
-        return self._iterate(self._buffer, self._overflow)
+        return self.subscribe()
+
+    def subscribe(
+        self,
+        *,
+        options: SubscriptionOptions | None = None,
+        criteria: SubscriptionCriteria[Hashable] | None = None,
+    ) -> AsyncIterator[T]:
+        """Create a subscription with optional delivery and routing policies.
+
+        Args:
+            options: Delivery policy for this subscriber. ``None`` inherits
+                the emitter's immutable defaults.
+            criteria: Keys this subscriber wants or rejects.  Criteria require
+                a router configured on this emitter.
+
+        Returns:
+            An async iterator ready to register on first iteration.
+        """
+        if options is not None and not isinstance(options, SubscriptionOptions):
+            raise TypeError("options must be a SubscriptionOptions or None")
+        if criteria is not None and not isinstance(
+            criteria,
+            SubscriptionCriteria,
+        ):
+            raise TypeError("criteria must be a SubscriptionCriteria or None")
+        if criteria is not None and self._router is None:
+            raise RuntimeError(
+                "subscription criteria require an emitter configured with a router"
+            )
+        return self._iterate(options or self._options, criteria)
 
     def with_buffer(
         self,
@@ -297,20 +420,32 @@ class IterEmitter(Generic[T]):
         Returns:
             An async iterator ready to register on first iteration.
         """
-        selected_overflow = self._overflow if overflow is None else overflow
-        self._validate_subscription_options(buffer, selected_overflow)
-        return self._iterate(buffer, selected_overflow)
+        selected_overflow = self._options.overflow if overflow is None else overflow
+        options = self._options.with_overrides(
+            buffer=buffer,
+            overflow=selected_overflow,
+        )
+        return self.subscribe(options=options)
+
+    def with_criteria(
+        self,
+        criteria: SubscriptionCriteria[Hashable],
+        *,
+        options: SubscriptionOptions | None = None,
+    ) -> AsyncIterator[T]:
+        """Create a routed subscription with optional delivery overrides."""
+        return self.subscribe(options=options, criteria=criteria)
 
     async def _iterate(
         self,
-        buffer: int | None,
-        overflow: OverflowPolicy,
+        options: SubscriptionOptions,
+        criteria: SubscriptionCriteria[Hashable] | None,
     ) -> AsyncIterator[T]:
         subscriber = _Subscriber(
             emitter=self,
             loop=asyncio.get_running_loop(),
-            buffer=buffer,
-            overflow=overflow,
+            options=options,
+            criteria=criteria,
         )
 
         if not self._register(subscriber):
@@ -341,42 +476,79 @@ class IterEmitter(Generic[T]):
             if self._closed:
                 return False
             self._subscribers.add(subscriber)
+            if subscriber.criteria is None or subscriber.criteria.wanted is None:
+                self._wildcard_subscribers.add(subscriber)
+            else:
+                for key in subscriber.criteria.wanted:
+                    self._subscribers_by_key.setdefault(key, set()).add(subscriber)
+            if subscriber.criteria is not None:
+                self._criteria_subscribers.add(subscriber)
             self._changed.notify_all()
             return True
 
     def _discard(self, subscriber: _Subscriber[T]) -> None:
         with self._lock:
-            if subscriber in self._subscribers:
-                self._subscribers.remove(subscriber)
-                self._changed.notify_all()
+            self._discard_locked(subscriber)
 
-    def _record_drop(self) -> None:
-        with self._stats_lock:
-            self._dropped += 1
+    def _discard_locked(self, subscriber: _Subscriber[T]) -> None:
+        """Remove a subscriber from every index while holding ``_lock``."""
+        if subscriber not in self._subscribers:
+            return
 
-    @staticmethod
-    def _validate_subscription_options(
-        buffer: int | None,
-        overflow: OverflowPolicy,
-    ) -> None:
-        if buffer is not None:
-            if not isinstance(buffer, int) or isinstance(buffer, bool):
-                raise TypeError("buffer must be an int or None")
-            if buffer < 1:
-                raise ValueError("buffer must be positive or None")
-        if not isinstance(overflow, OverflowPolicy):
-            raise TypeError("overflow must be an OverflowPolicy")
+        self._subscribers.remove(subscriber)
+        self._wildcard_subscribers.discard(subscriber)
+        self._criteria_subscribers.discard(subscriber)
+        if subscriber.criteria is not None and subscriber.criteria.wanted is not None:
+            for key in subscriber.criteria.wanted:
+                indexed = self._subscribers_by_key[key]
+                indexed.discard(subscriber)
+                if not indexed:
+                    del self._subscribers_by_key[key]
+        self._changed.notify_all()
+
+    def _matching_subscribers(self, payload: T) -> tuple[_Subscriber[T], ...]:
+        """Return the matching registry snapshot while holding ``_lock``."""
+        if self._router is None or not self._criteria_subscribers:
+            return tuple(self._subscribers)
+
+        route_keys = self._route_keys(payload)
+        candidates = set(self._wildcard_subscribers)
+        for key in route_keys:
+            candidates.update(self._subscribers_by_key.get(key, ()))
+        return tuple(
+            subscriber
+            for subscriber in candidates
+            if subscriber.criteria is None
+            or subscriber.criteria.matches(route_keys)
+        )
+
+    def _route_keys(self, payload: T) -> frozenset[Hashable]:
+        """Extract and validate route keys once for an emitted payload."""
+        router = self._router
+        assert router is not None
+        routed = router(payload)
+        if isinstance(routed, Hashable):
+            return frozenset((routed,))
+        try:
+            return frozenset(routed)
+        except TypeError as error:
+            raise TypeError(
+                "router must return a hashable key or an iterable of hashable keys"
+            ) from error
 
 
-class EmitIO(UniteIO):
+class EmitIO(UniteIO, Generic[T]):
     """A UniteIO application with an optional owned :class:`IterEmitter`.
 
     Supply emitter defaults at class definition time::
 
-        class PriceFeed(EmitIO, emitter={
-            "buffer": 1024,
-            "overflow": OverflowPolicy.DISCONNECT,
-        }):
+        class PriceFeed(
+            EmitIO[Ticker],
+            emitter=EmitterOptions(
+                subscription=SubscriptionOptions(buffer=1024),
+                router=ticker_route_keys,
+            ),
+        ):
             ...
 
     The configuration is validated when the subclass is defined.  A fresh
@@ -385,55 +557,72 @@ class EmitIO(UniteIO):
     ``emitter=None``.
     """
 
-    _emitter_options: ClassVar[dict[str, Any] | None] = None
+    _emitter_options: ClassVar[EmitterOptions[Any] | None] = None
 
     @classmethod
     def __init_subclass__(
         cls,
         *,
-        emitter: Mapping[str, Any] | None | object = _EMITTER_UNSET,
+        emitter: (
+            EmitterOptions[Any]
+            | SubscriptionOptions
+            | Mapping[str, object]
+            | None
+            | object
+        ) = _EMITTER_UNSET,
         **kwargs: Any,
     ) -> None:
         """Configure an application-owned emitter and UniteIO class options."""
         super().__init_subclass__(**kwargs)
 
         if emitter is _EMITTER_UNSET:
-            inherited = getattr(cls, "_emitter_options", None)
-            cls._emitter_options = None if inherited is None else dict(inherited)
+            cls._emitter_options = getattr(cls, "_emitter_options", None) or EmitterOptions()
             return
 
         if emitter is None:
             cls._emitter_options = None
             return
 
+        cls._emitter_options = cls._coerce_emitter_options(emitter)
+
+    @staticmethod
+    def _coerce_emitter_options(
+        emitter: EmitterOptions[Any] | SubscriptionOptions | Mapping[str, object] | object,
+    ) -> EmitterOptions[Any]:
+        """Normalize the class option and retain mapping compatibility."""
+        if isinstance(emitter, EmitterOptions):
+            return emitter
+        if isinstance(emitter, SubscriptionOptions):
+            return EmitterOptions(subscription=emitter)
         if not isinstance(emitter, Mapping):
-            raise TypeError("emitter must be a mapping or None")
+            raise TypeError(
+                "emitter must be an EmitterOptions, SubscriptionOptions, "
+                "mapping, or None"
+            )
 
-        unknown = set(emitter) - {"buffer", "overflow"}
-        if unknown:
-            names = ", ".join(sorted(map(str, unknown)))
-            raise TypeError(f"unknown emitter option(s): {names}")
-
-        options = {
-            "buffer": emitter.get("buffer", 1_024),
-            "overflow": emitter.get("overflow", OverflowPolicy.DISCONNECT),
-        }
-        IterEmitter._validate_subscription_options(
-            options["buffer"],
-            options["overflow"],
-        )
-        cls._emitter_options = options
+        values = dict(emitter)
+        router = values.pop("router", None)
+        try:
+            subscription = SubscriptionOptions(**values)
+        except TypeError as error:
+            raise TypeError(f"invalid emitter option(s): {error}") from error
+        return EmitterOptions(subscription=subscription, router=router)
 
     def __init__(self, **kwargs: Any) -> None:
         """Create the configured emitter before initializing the app thread."""
         options = self.__class__._emitter_options
         self._iter_emitter = (
-            None if options is None else IterEmitter(**options)
+            None
+            if options is None
+            else IterEmitter(
+                options.subscription,
+                router=cast(RouteExtractor[T] | None, options.router),
+            )
         )
         super().__init__(**kwargs)
 
     @property
-    def emitter(self) -> IterEmitter[Any]:
+    def emitter(self) -> IterEmitter[T]:
         """Return this application's configured emitter.
 
         Raises:
@@ -445,20 +634,38 @@ class EmitIO(UniteIO):
             )
         return self._iter_emitter
 
-    def __aiter__(self) -> AsyncIterator[Any]:
+    def __aiter__(self) -> AsyncIterator[T]:
         """Iterate using this application's default subscriber policy."""
         return aiter(self.emitter)
+
+    def subscribe(
+        self,
+        *,
+        options: SubscriptionOptions | None = None,
+        criteria: SubscriptionCriteria[Hashable] | None = None,
+    ) -> AsyncIterator[T]:
+        """Create an optional routed subscription to this application's emitter."""
+        return self.emitter.subscribe(options=options, criteria=criteria)
 
     def with_buffer(
         self,
         buffer: int | None,
         *,
         overflow: OverflowPolicy | None = None,
-    ) -> AsyncIterator[Any]:
+    ) -> AsyncIterator[T]:
         """Create an application subscription with an overridden policy."""
         return self.emitter.with_buffer(buffer, overflow=overflow)
 
-    def emit(self, payload: Any) -> int:
+    def with_criteria(
+        self,
+        criteria: SubscriptionCriteria[Hashable],
+        *,
+        options: SubscriptionOptions | None = None,
+    ) -> AsyncIterator[T]:
+        """Create a routed application subscription."""
+        return self.emitter.with_criteria(criteria, options=options)
+
+    def emit(self, payload: T) -> int:
         """Broadcast through this application's configured emitter."""
         return self.emitter.emit(payload)
 

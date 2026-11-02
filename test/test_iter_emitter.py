@@ -3,21 +3,22 @@ import asyncio
 import pytest
 
 from uniteio import (
+    EmitterOptions,
     EmitIO,
     IterEmitter,
     OverflowPolicy,
     SlowConsumerError,
+    SubscriptionCriteria,
+    SubscriptionOptions,
     UniteIO,
 )
 
 
 async def wait_for_subscribers(emitter, count):
-    for _ in range(1_000):
-        if emitter.subscriber_count == count:
-            return
-        await asyncio.sleep(0)
-    raise AssertionError(
-        f"expected {count} subscribers, found {emitter.subscriber_count}"
+    assert await asyncio.to_thread(
+        emitter.wait_for_subscribers,
+        count,
+        2,
     )
 
 
@@ -32,7 +33,7 @@ async def wait_for_subscribers(emitter, count):
 )
 def test_subscription_options_are_validated(buffer, error):
     with pytest.raises(error):
-        IterEmitter(buffer=buffer)
+        SubscriptionOptions(buffer=buffer)
 
     emitter = IterEmitter()
     with pytest.raises(error):
@@ -40,6 +41,30 @@ def test_subscription_options_are_validated(buffer, error):
 
     with pytest.raises(TypeError):
         emitter.with_buffer(1, overflow="drop-oldest")
+
+
+def test_subscription_options_are_immutable_and_replaceable():
+    defaults = SubscriptionOptions()
+    latest = defaults.with_overrides(
+        buffer=1,
+        overflow=OverflowPolicy.DROP_OLDEST,
+    )
+
+    assert defaults.buffer == 1_024
+    assert latest == SubscriptionOptions(
+        buffer=1,
+        overflow=OverflowPolicy.DROP_OLDEST,
+    )
+    with pytest.raises(TypeError):
+        defaults.with_overrides(unexpected=True)
+
+
+def test_statistics_are_not_part_of_the_emitter_api():
+    emitter = IterEmitter()
+
+    assert not hasattr(emitter, "emitted_count")
+    assert not hasattr(emitter, "dropped_count")
+    assert not hasattr(emitter, "subscriber_count")
 
 
 def test_late_iteration_finishes_after_close():
@@ -103,10 +128,88 @@ def test_consumer_specific_overflow_policies():
         assert await newest_value == 2
         with pytest.raises(SlowConsumerError):
             await rejected
-        assert emitter.dropped_count == 5
 
         await oldest.aclose()
         await newest.aclose()
+
+    asyncio.run(run())
+
+
+def test_routed_subscriptions_skip_unmatched_payloads_and_deduplicate():
+    def route(payload):
+        return {
+            ("event", payload["event"]),
+            ("symbol", payload["symbol"]),
+            ("event", payload["event"], "symbol", payload["symbol"]),
+        }
+
+    async def run():
+        emitter = IterEmitter[dict[str, str]](router=route)
+        all_events = emitter.subscribe()
+        bitcoin_tickers = emitter.with_criteria(
+            SubscriptionCriteria(
+                wanted=frozenset({("event", "ticker", "symbol", "BTCUSDT")}),
+            ),
+        )
+        non_bitcoin_tickers = emitter.with_criteria(
+            SubscriptionCriteria(
+                wanted=frozenset({("event", "ticker")}),
+                unwanted=frozenset({("symbol", "BTCUSDT")}),
+            ),
+        )
+        duplicate_key_match = emitter.with_criteria(
+            SubscriptionCriteria(
+                wanted=frozenset({
+                    ("symbol", "BTCUSDT"),
+                    ("event", "ticker", "symbol", "BTCUSDT"),
+                }),
+            ),
+        )
+
+        all_btc = asyncio.create_task(anext(all_events))
+        btc = asyncio.create_task(anext(bitcoin_tickers))
+        non_btc = asyncio.create_task(anext(non_bitcoin_tickers))
+        duplicate = asyncio.create_task(anext(duplicate_key_match))
+        await wait_for_subscribers(emitter, 4)
+
+        bitcoin = {"event": "ticker", "symbol": "BTCUSDT"}
+        assert emitter.emit(bitcoin) == 3
+        assert await all_btc == bitcoin
+        assert await btc == bitcoin
+        assert await duplicate == bitcoin
+
+        all_eth = asyncio.create_task(anext(all_events))
+        ethereum = {"event": "ticker", "symbol": "ETHUSDT"}
+        assert emitter.emit(ethereum) == 2
+        assert await all_eth == ethereum
+        assert await non_btc == ethereum
+
+        await all_events.aclose()
+        await bitcoin_tickers.aclose()
+        await non_bitcoin_tickers.aclose()
+        await duplicate_key_match.aclose()
+        assert emitter.close(wait=True, timeout=2)
+
+    asyncio.run(run())
+
+
+def test_criteria_require_a_router_and_cancellation_cleans_the_index():
+    criterion = SubscriptionCriteria(wanted=frozenset({"ticker"}))
+    with pytest.raises(RuntimeError, match="router"):
+        IterEmitter[str]().with_criteria(criterion)
+
+    async def run():
+        emitter = IterEmitter[str](router=lambda payload: payload)
+        iterator = emitter.with_criteria(criterion)
+        waiting = asyncio.create_task(anext(iterator))
+        await wait_for_subscribers(emitter, 1)
+
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+
+        assert emitter.emit("ticker") == 0
+        assert emitter.close()
 
     asyncio.run(run())
 
@@ -142,10 +245,15 @@ def test_emitio_broadcasts_to_distinct_application_loops():
     archived = []
     evaluated = []
 
-    class PriceFeed(EmitIO, emitter={
-        "buffer": 1_024,
-        "overflow": OverflowPolicy.DISCONNECT,
-    }):
+    class PriceFeed(
+        EmitIO[int],
+        emitter=EmitterOptions(
+            subscription=SubscriptionOptions(
+                buffer=1_024,
+                overflow=OverflowPolicy.DISCONNECT,
+            ),
+        ),
+    ):
         async def __call__(self):
             await asyncio.Event().wait()
 
@@ -154,7 +262,7 @@ def test_emitio_broadcasts_to_distinct_application_loops():
             super().__init__(source=source)
 
         async def __call__(self):
-            async for value in self.source.where(None):
+            async for value in self.source.with_buffer(None):
                 archived.append(value)
                 await asyncio.sleep(0.001)
 
@@ -163,7 +271,7 @@ def test_emitio_broadcasts_to_distinct_application_loops():
             super().__init__(source=source)
 
         async def __call__(self):
-            async for value in self.source.where(
+            async for value in self.source.with_buffer(
                 1,
                 overflow=OverflowPolicy.DROP_OLDEST,
             ):
@@ -182,7 +290,6 @@ def test_emitio_broadcasts_to_distinct_application_loops():
     assert archived == list(range(20))
     assert evaluated[-1] == 19
     assert len(evaluated) < len(archived)
-    assert feed.emitter.dropped_count > 0
 
     archive.stop()
     strategy.stop()
@@ -196,15 +303,48 @@ def test_emitio_validates_configuration_and_recreates_emitter():
             async def __call__(self):
                 pass
 
-    class Source(EmitIO, emitter={}):
+    class Source(EmitIO[str], emitter=SubscriptionOptions(buffer=None)):
         async def __call__(self):
             await asyncio.Event().wait()
 
     first = Source()
     first_emitter = first.emitter
+    assert first_emitter.options.buffer is None
     assert first.stop(timeout=2)
     assert first_emitter.closed
 
     second = Source()
     assert second.emitter is not first_emitter
     assert second.stop(timeout=2)
+
+
+def test_emitio_mapping_configuration_keeps_legacy_syntax_and_adds_routing():
+    def route(payload: str):
+        return payload.split(":", maxsplit=1)[0]
+
+    class RoutedSource(
+        EmitIO[str],
+        emitter={
+            "buffer": 2,
+            "router": route,
+        },
+    ):
+        async def __call__(self):
+            await asyncio.Event().wait()
+
+    source = RoutedSource()
+    assert source.emitter.options.buffer == 2
+
+    async def receive():
+        ticker = source.with_criteria(
+            SubscriptionCriteria(wanted=frozenset({"ticker"})),
+        )
+        received = asyncio.create_task(anext(ticker))
+        await wait_for_subscribers(source.emitter, 1)
+
+        assert source.emit("ticker:BTCUSDT") == 1
+        assert await received == "ticker:BTCUSDT"
+        await ticker.aclose()
+
+    asyncio.run(receive())
+    assert source.stop(timeout=2)
