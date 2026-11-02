@@ -1,7 +1,6 @@
 # 0001 — Runtime: aplicações, loops e limites
 
-**Status:** contrato validado em esboço (`uniteio/runtime.py`, `test/test_runtime.py`);
-a base ainda não foi reestruturada
+**Status:** implementado na 0.2.0 (`src/uniteio/runtime.py`, `test/test_runtime.py`)
 **Data:** 2026-11-02
 
 ## Contexto

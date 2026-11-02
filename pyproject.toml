@@ -56,6 +56,5 @@ Repository = "https://github.com/dangreb/UniteIO.git"
 Issues = "https://github.com/dangreb/UniteIO/issues"
 
 [tool.setuptools.packages.find]
-where = ["."]
+where = ["src"]
 include = ["uniteio*"]
-exclude = ["test*", "wa*"]

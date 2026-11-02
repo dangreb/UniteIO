@@ -10,7 +10,9 @@ decisions are recorded in `design/0001-runtime.md`.
 
 ## Repository layout
 
-- `uniteio/`: public package; `uniteio/runtime.py` holds `App` and `Runtime`.
+- `src/uniteio/`: public package; `src/uniteio/runtime.py` holds `App` and
+  `Runtime`. Tests import the installed package, so install it in editable mode
+  first (see below).
 - `test/`: pytest suite; `test/conftest.py` closes the default runtime.
 - `design/`: design notes (Markdown, not part of the Sphinx build).
 - `docs/`: Sphinx documentation.
@@ -57,7 +59,7 @@ introduce or claim a formatting requirement without updating project tooling.
 
 ## Implementation conventions
 
-- Preserve the existing public API exported from `uniteio/__init__.py` and the
+- Preserve the existing public API exported from `src/uniteio/__init__.py` and the
   module-level `__all__` declarations unless an API change is intentional.
 - Keep thread ownership and event-loop affinity explicit. `App.submit` is the
   only way into a loop from another thread; coroutine work belongs on an
