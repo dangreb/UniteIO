@@ -3,13 +3,16 @@
 ## Project overview
 
 UniteIO is an early-alpha Python library for running independent `asyncio`
-applications on dedicated threads while sharing one process-wide thread pool.
-It targets CPython 3.14.5+ and is designed primarily for free-threaded builds.
+applications on dedicated threads while sharing one thread-pool executor. It
+targets CPython 3.14.5+, with and without the GIL. A `Runtime` owns the
+executor, the application registry and one thread per `App`; the design
+decisions are recorded in `design/0001-runtime.md`.
 
 ## Repository layout
 
-- `uniteio/`: public package and concurrency implementation.
-- `test/`: pytest suite; shared singleton cleanup lives in `test/conftest.py`.
+- `uniteio/`: public package; `uniteio/runtime.py` holds `App` and `Runtime`.
+- `test/`: pytest suite; `test/conftest.py` closes the default runtime.
+- `design/`: design notes (Markdown, not part of the Sphinx build).
 - `docs/`: Sphinx documentation.
 - `.github/workflows/`: CI and release behavior.
 - `pyproject.toml`: package metadata and dependency groups.
@@ -31,8 +34,8 @@ python -m pytest
 Run a focused test while developing:
 
 ```console
-python -m pytest test/test_application.py
-python -m pytest test/test_application.py::test_each_application_class_is_a_singleton
+python -m pytest test/test_runtime.py
+python -m pytest test/test_runtime.py::test_start_returns_the_same_instance_and_registers_it
 ```
 
 Match CI coverage checks with:
@@ -56,15 +59,19 @@ introduce or claim a formatting requirement without updating project tooling.
 
 - Preserve the existing public API exported from `uniteio/__init__.py` and the
   module-level `__all__` declarations unless an API change is intentional.
-- Keep thread ownership and event-loop affinity explicit. Coroutine work belongs
-  on an application's loop; synchronous work belongs in the shared `UIOPool`.
+- Keep thread ownership and event-loop affinity explicit. `App.submit` is the
+  only way into a loop from another thread; coroutine work belongs on an
+  application's loop and synchronous work on the runtime's shared executor.
+- Application loops are `GuardedLoop` instances, which reject non-thread-safe
+  calls from other threads. Do not work around the guard; use
+  `call_soon_threadsafe` or `submit`.
 - Treat shared mutable state as thread-sensitive and protect it with appropriate
   synchronization.
-- Preserve singleton lifecycle behavior. Applications and the shared executor
-  must be removable after shutdown so later tests or callers can recreate them.
+- There are no singletons. Tests create their own `Runtime` (usually with
+  `with Runtime() as rt:`); only `Runtime.default()` is process-wide.
 - Avoid blocking an event-loop thread. Use asynchronous primitives on loops and
   thread-safe scheduling when crossing loop or thread boundaries.
-- Maintain compatibility with both standard and free-threaded CPython 3.14.
+- Maintain compatibility with both standard and free-threaded CPython 3.14+.
 - Follow the surrounding style: four-space indentation, descriptive snake_case
   tests, type annotations where they clarify contracts, and docstrings for
   public classes and methods.
@@ -73,11 +80,10 @@ introduce or claim a formatting requirement without updating project tooling.
 
 - Add or update tests for every behavior change and regression fix.
 - Concurrency tests must use bounded waits/timeouts so failures cannot hang CI.
-- Do not rely on test order. The autouse fixture resets application and pool
-  singleton state after each test; extend that cleanup if new global state is
-  introduced.
+- Do not rely on test order. The autouse fixture closes `Runtime.default()`
+  after each test; extend that cleanup if new global state is introduced.
 - Exercise shutdown, cancellation, exception, and cross-thread edge cases when
-  changing lifecycle or emitter behavior.
+  changing lifecycle or `submit` behavior.
 - Run the focused tests first, then the full suite before considering a change
   complete.
 

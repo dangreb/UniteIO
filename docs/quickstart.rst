@@ -4,151 +4,144 @@ Quick start
 Installation
 ------------
 
-Install the package into a free-threaded Python 3.14.5 or newer environment::
+::
 
    pip install uniteio
 
-UniteIO warns when the interpreter's GIL is enabled. The library can still
-provide separate event loops in that configuration, but parallel execution of
-Python code between their threads is the capability free-threaded CPython adds.
-
-Check whether the interpreter supports free threading and whether the GIL is
-currently enabled:
+UniteIO requires Python 3.14.5 or newer. It runs on regular and free-threaded
+builds. To check which one you have:
 
 .. code-block:: console
 
    $ python -c "import sys, sysconfig; print('free-threaded build:', bool(sysconfig.get_config_var('Py_GIL_DISABLED'))); print('GIL enabled:', sys._is_gil_enabled())"
-   free-threaded build: True
-   GIL enabled: False
 
-A free-threaded build can optionally run with the GIL enabled, and importing an
-incompatible C extension may enable it automatically. Python documents the
-runtime controls and compatibility considerations in its
+A free-threaded build can still run with the GIL enabled, for example when a C
+extension that does not support free threading is imported. See Python's
 `free-threading guide <https://docs.python.org/3/howto/free-threading-python.html>`_.
 
-One runtime, two independent loops
-----------------------------------
+Defining an application
+-----------------------
 
-Consider a market-data process that consumes two Binance websocket streams.
-Trade bursts and ticker updates have different processing characteristics, but
-the consumers need access to the same in-process market state.
+An application subclasses :class:`~uniteio.App` and implements
+``async __call__``. The constructor is an ordinary constructor: it takes any
+arguments and runs on the caller's thread. ``__call__`` runs later, on the
+application's own loop.
 
-Model each long-running consumer as a different :class:`uniteio.UniteIO`
-subclass. The stream below is a self-contained stand-in for an async iterator
-provided by a Binance websocket client:
+The example below starts a small TCP server that upper-cases each line it
+receives, and a second application that counts lines in an object shared with
+the server.
 
 .. code-block:: python
 
    import asyncio
-   from threading import Lock
+   import threading
 
-   from uniteio import UniteIO
+   from uniteio import App, Runtime
 
 
-   class MarketState:
-       """State deliberately shared by both event-loop threads."""
+   class Counter:
+       """Shared by both application threads, so it is protected by a lock."""
 
        def __init__(self):
-           self._lock = Lock()
-           self.values = {}
+           self._lock = threading.Lock()
+           self.lines = 0
 
-       def update(self, key, value):
+       def add(self):
            with self._lock:
-               self.values[key] = value
+               self.lines += 1
 
 
-   async def demo_stream(event_type):
-       """Replace this with the async iterator from a websocket client."""
-       sequence = 0
-       while True:
-           await asyncio.sleep(0.25)
-           sequence += 1
-           yield {"type": event_type, "sequence": sequence}
+   class UpperServer(App):
+       name = "upper"
+
+       def __init__(self, counter):
+           self.counter = counter
+           self.ready = asyncio.Event()  # created here, used only on the app's loop
+
+       async def handle(self, reader, writer):
+           while line := await reader.readline():
+               self.counter.add()
+               writer.write(line.upper())
+               await writer.drain()
+           writer.close()
+           await writer.wait_closed()
+
+       async def __call__(self):
+           self.server = await asyncio.start_server(self.handle, "127.0.0.1", 0)
+           self.port = self.server.sockets[0].getsockname()[1]
+           self.ready.set()
+           await self.server.serve_forever()
 
 
-   class TradeStream(UniteIO, prefix="TRD"):
-       def __init__(self, state):
-           super().__init__(state=state)
+   class Client(App):
+       async def ask(self, port, text):
+           reader, writer = await asyncio.open_connection("127.0.0.1", port)
+           writer.write(text.encode() + b"\n")
+           reply = await reader.readline()
+           writer.close()
+           await writer.wait_closed()
+           return reply.decode().strip()
 
-       async def __call__(self) -> None:
-           async for trade in demo_stream("trade"):
-               self.state.update("last_trade", trade)
+       async def __call__(self):
+           pass  # nothing to set up; work arrives through submit()
 
+Starting and finding applications
+---------------------------------
 
-   class TickerStream(UniteIO, prefix="TCK"):
-       def __init__(self, state):
-           super().__init__(state=state)
+:meth:`Runtime.start <uniteio.Runtime.start>` starts the application on a new
+thread and returns the same object once its loop is running. Leaving the
+``with`` block closes the runtime: every application is stopped, then the
+executor is shut down.
 
-       async def __call__(self) -> None:
-           async for ticker in demo_stream("ticker"):
-               self.state.update("last_ticker", ticker)
+.. code-block:: python
 
+   counter = Counter()
 
-   state = MarketState()
-   trades = TradeStream(state=state)
-   ticker = TickerStream(state=state)
+   with Runtime() as rt:
+       server = rt.start(UpperServer(counter))
+       client = rt.start(Client())
 
-``trades`` and ``ticker`` now run concurrently on different event loops and
-different threads. On free-threaded CPython, eligible Python callbacks on those
-threads may also run in parallel. They share ``state`` by reference, so its
-mutable dictionary is protected by :class:`threading.Lock`.
+       server.submit(server.ready.wait).result(timeout=2)
+       reply = client.submit(client.ask, server.port, "hello").result(timeout=2)
 
-Each concrete subclass has one active instance. Constructing ``TradeStream`` a
-second time returns the same running trade application; the different
-``TickerStream`` subclass receives its own application, thread, and loop.
+       assert reply == "HELLO"
+       assert counter.lines == 1
+       assert rt["upper"] is server and rt[Client] is client
+
+The registry name comes from the ``name`` argument of ``start``, a ``name``
+class attribute, or the class name, in that order. Running several instances of
+one class only needs different names:
+
+.. code-block:: python
+
+   first = rt.start(Client(), name="client-1")
+   second = rt.start(Client(), name="client-2")
 
 Submitting work
 ---------------
 
-Submit coroutine work to a particular application's loop from synchronous
-code:
+:meth:`App.submit <uniteio.App.submit>` is how other threads hand work to an
+application. Coroutines run on the application's loop; other callables run on
+the runtime's shared executor. Both return a
+:class:`concurrent.futures.Future`.
 
 .. code-block:: python
 
-   ready = trades.submit(
-       asyncio.sleep,
-       0,
-       result="trade loop ready",
-       name="warmup",
-   )
-   assert ready.result() == "trade loop ready"
+   reply = client.submit(client.ask, server.port, "hi").result(timeout=2)
+   total = client.submit(sum, [1, 2, 3]).result(timeout=2)   # runs on the executor
 
-The target application determines the destination loop. This makes it possible
-to keep task groups, timeouts, and loop-local resources isolated by concern.
+Inside an application's loop, use asyncio directly: ``await``,
+:func:`asyncio.create_task`, :class:`asyncio.TaskGroup`. The
+:doc:`guide` describes ``submit`` in detail.
 
-Synchronous callables submitted through ``submit`` run on the shared
-:class:`uniteio.UIOPool` instead:
-
-.. code-block:: python
-
-   total = ticker.submit(sum, [1, 2, 3])
-   assert total.result() == 6
-
-The shared executor is useful for ordinary blocking or synchronous work. It is
-separate from the dedicated threads that drive the application event loops.
-
-What independence means
------------------------
-
-* A slow callback blocks its own loop thread, not the other application's loop.
-* Loop-local tasks, async generators, and cancellation are owned by one app.
-* Free-threaded CPython permits Python work on different loop threads to run in
-  parallel; actual speedups still depend on the workload and libraries used.
-* Globals and passed objects remain genuinely shared. Mutable access must be
-  synchronized, and cross-loop asyncio primitives should not be shared.
-
-Shutdown
+Stopping
 --------
 
-Stop one stream without affecting the other loop or shared executor::
+Stop one application with :meth:`App.stop <uniteio.App.stop>`; the others keep
+running. :meth:`Runtime.close <uniteio.Runtime.close>`, which the ``with`` block
+calls on exit, stops all of them and then shuts the executor down.
 
-   trades.stop(timeout=2)
+.. code-block:: python
 
-   # The ticker application remains active.
-   ticker.stop(timeout=2)
-
-Or stop every registered application before shutting down the executor::
-
-   from uniteio import UIOPool
-
-   UIOPool().shutdown(cancel_futures=True)
+   client.stop(timeout=2)
+   assert not client.is_alive()

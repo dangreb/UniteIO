@@ -1,41 +1,43 @@
 UniteIO
 =======
 
-UniteIO runs multiple independent asyncio applications inside one Python
-process. Each concrete application class has one singleton instance, one
-dedicated thread, and one event loop. Applications can share ordinary Python
-state and a process-wide executor without combining all asynchronous work on a
-single loop.
+UniteIO runs several asyncio applications in one Python process, each on its
+own thread with its own event loop. The applications share the process, its
+state, and one thread-pool executor for synchronous work.
 
-Why free-threaded Python?
--------------------------
+A :class:`~uniteio.Runtime` owns the executor, a registry of running
+applications, and their threads. An :class:`~uniteio.App` is a class with an
+``async __call__``; the runtime starts it on a new thread and runs that
+coroutine on the application's loop.
 
-On a traditional CPython build, separate loop threads provide scheduling and
-failure isolation, but the GIL still serializes execution of Python bytecode.
-On a free-threaded build, callbacks running on different UniteIO loop threads
-can execute Python code in parallel when the runtime and invoked libraries
-permit it.
+.. code-block:: python
 
-For example, one application can consume Binance trade events while another
-consumes ticker events. A burst of processing on the trade loop does not occupy
-the ticker loop's event-loop thread. Both applications remain in the same
-runtime, so they can deliberately share caches, configuration, metrics, and
-other state.
+   import asyncio
+   from uniteio import App, Runtime
 
-Independent loops do not make shared state automatically thread-safe. Protect
-mutable objects with locks or another thread-safe coordination mechanism, just
-as you would with any multithreaded Python program.
+   class Clock(App):
+       async def __call__(self):
+           while True:
+               await asyncio.sleep(1)
 
-Start with the quick-start guide for a two-loop streaming example. The emitter
-guide shows how one websocket connection can broadcast to applications on
-separate loops, and the API reference documents the complete public interface.
+   with Runtime() as rt:
+       clock = rt.start(Clock())
+
+UniteIO works with and without the GIL. On a free-threaded build, Python code on
+different application threads can run in parallel; with the GIL, the loops are
+still independent, but their Python code takes turns.
+
+.. note::
+
+   UniteIO is an early alpha and requires Python 3.14.5 or newer. The API may
+   still change between minor versions.
 
 .. toctree::
    :maxdepth: 2
    :caption: Contents
 
    quickstart
-   emitters
+   guide
    api
 
 Indices

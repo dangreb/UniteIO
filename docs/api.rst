@@ -1,26 +1,14 @@
 API reference
 =============
 
-Applications and shared pool
-----------------------------
+.. module:: uniteio
 
-.. automodule:: uniteio.uniteio
-   :members: UniteIO, UIOPool
+.. autoclass:: uniteio.Runtime
+   :members:
+   :special-members: __getitem__, __contains__, __len__, __enter__, __exit__
    :member-order: bysource
-   :show-inheritance:
 
-Cross-loop event emitters
--------------------------
-
-.. automodule:: uniteio.iter_emitter
-   :members: EmitIO, IterEmitter, OverflowPolicy, SlowConsumerError
+.. autoclass:: uniteio.App
+   :members:
+   :special-members: __call__
    :member-order: bysource
-   :show-inheritance:
-
-Adjustable executor
--------------------
-
-.. automodule:: uniteio.adjustable_pool
-   :members: AdjustableThreadPoolExecutor
-   :member-order: bysource
-   :show-inheritance:

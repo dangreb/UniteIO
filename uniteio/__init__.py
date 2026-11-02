@@ -1,28 +1,17 @@
-
-"""Public package interface for UniteIO.
-
-The package exports :class:`UniteIO`, the emitter-enabled :class:`EmitIO`, its
-shared :class:`UIOPool`, and the optional
-:class:`AdjustableThreadPoolExecutor` implementation. Each concrete application
-class owns an independent event-loop thread. Free-threaded CPython allows
-eligible work on those threads to execute in parallel while applications
-continue to share the same process and explicitly synchronized global state.
+"""UniteIO: asyncio applications on dedicated threads, sharing one executor.
 
 Example:
-    Create an application whose asynchronous entry point runs on its own
-    event-loop thread::
+    Start an application on its own loop thread and stop it again::
 
         import asyncio
-        from uniteio import UniteIO
+        from uniteio import App, Runtime
 
-        class Worker(UniteIO):
+        class Worker(App):
             async def __call__(self):
                 await asyncio.Event().wait()
 
-        worker = Worker()
-        worker.stop()
+        with Runtime() as rt:
+            worker = rt.start(Worker())
 """
 
-from uniteio.uniteio import *
-from uniteio.iter_emitter import *
-from uniteio.adjustable_pool import *
+from uniteio.runtime import *

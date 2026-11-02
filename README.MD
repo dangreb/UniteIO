@@ -5,31 +5,16 @@
 [![Python 3.14+](https://img.shields.io/badge/python-3.14%2B-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/dangreb/UniteIO/blob/master/LICENSE)
 
-UniteIO runs multiple independent asyncio applications in one Python process.
-Each application class is a singleton with its own dedicated thread and event
-loop, while all applications can still share process-wide state and one
-thread-pool executor for synchronous work.
+UniteIO runs several asyncio applications in one Python process, each on its
+own thread with its own event loop. The applications share the process, its
+state, and one thread-pool executor for synchronous work.
 
-This model is especially useful on free-threaded CPython. With the GIL
-disabled, Python callbacks belonging to different event-loop threads can make
-progress in parallel: a busy trade-stream consumer does not have to share an
-event-loop turn with a price-ticker consumer. You keep the convenience of one
-runtime and shared state without putting every asynchronous workload on one
-loop.
+It works with and without the GIL. On a free-threaded build, Python code on
+different application threads can run in parallel; with the GIL, the loops are
+still independent, but their Python code takes turns.
 
-> **Status:** UniteIO is an early alpha designed for CPython free-threaded
-> environments. It requires Python 3.14.5 or newer and emits a warning when the
-> interpreter's GIL is enabled.
-
-Confirm both the build and its current runtime mode with:
-
-```console
-python -c "import sys, sysconfig; print('free-threaded build:', bool(sysconfig.get_config_var('Py_GIL_DISABLED'))); print('GIL enabled:', sys._is_gil_enabled())"
-```
-
-A free-threaded build can still run with the GIL enabled, including when an
-incompatible C extension enables it. See Python's
-[free-threading guide](https://docs.python.org/3/howto/free-threading-python.html).
+> **Status:** early alpha. Requires Python 3.14.5 or newer. The API may still
+> change between minor versions.
 
 ## Installation
 
@@ -37,154 +22,58 @@ incompatible C extension enables it. See Python's
 pip install uniteio
 ```
 
-## Quick start
-
-This example mirrors an application with two websocket subscriptions. Replace
-`demo_stream` with the async iterator exposed by your Binance client: the trade
-and ticker consumers will continue to run on separate event loops.
+## Example
 
 ```python
 import asyncio
-from threading import Lock
-
-from uniteio import UniteIO
+from uniteio import App, Runtime
 
 
-class MarketState:
-    def __init__(self):
-        self._lock = Lock()
-        self.values = {}
+class Clock(App):
+    """Ticks on its own thread and loop."""
 
-    def update(self, key, value):
-        # Both loop threads share this object.
-        with self._lock:
-            self.values[key] = value
-
-
-async def demo_stream(event_type):
-    """Stand-in for a Binance websocket subscription."""
-    sequence = 0
-    while True:
-        await asyncio.sleep(0.25)
-        sequence += 1
-        yield {"type": event_type, "sequence": sequence}
-
-
-class TradeStream(UniteIO, prefix="TRD"):
-    def __init__(self, state):
-        super().__init__(state=state)
-
-    async def __call__(self) -> None:
-        async for trade in demo_stream("trade"):
-            self.state.update("last_trade", trade)
-
-
-class TickerStream(UniteIO, prefix="TCK"):
-    def __init__(self, state):
-        super().__init__(state=state)
-
-    async def __call__(self) -> None:
-        async for ticker in demo_stream("ticker"):
-            self.state.update("last_ticker", ticker)
-
-
-state = MarketState()
-trades = TradeStream(state=state)
-ticker = TickerStream(state=state)
-
-# Coroutine work is routed to the selected application's own event loop.
-future = trades.submit(asyncio.sleep, 0, result="ready", name="warmup")
-assert future.result() == "ready"
-
-# Synchronous work runs on the shared UIOPool.
-assert ticker.submit(sum, [1, 2, 3]).result() == 6
-
-trades.stop()
-ticker.stop()
-```
-
-`TradeStream` and `TickerStream` are different concrete application classes,
-so they own different threads and different asyncio loops. On free-threaded
-CPython, eligible Python work in those threads can execute simultaneously.
-Network I/O remains asynchronous, and shared mutable objects still require
-normal thread-safety measures such as locks.
-
-Calling `UIOPool().shutdown()` stops all registered applications before
-shutting down the shared executor.
-
-## Broadcast one connection to multiple loops
-
-`EmitIO` lets one application own a websocket connection and broadcast its
-events to applications on other UniteIO loops. Each consumer selects its own
-buffer capacity and overflow policy.
-
-```python
-from uniteio import EmitIO, OverflowPolicy, UniteIO
-
-
-class PriceFeed(EmitIO, emitter={
-    "buffer": 1024,
-    "overflow": OverflowPolicy.DISCONNECT,
-}):
-    def __init__(self, websocket):
-        super().__init__(websocket=websocket)
+    def __init__(self, interval):
+        self.interval = interval   # ordinary constructor, any signature
+        self.ticks = 0
 
     async def __call__(self):
-        try:
-            async for ticker in self.websocket:
-                self.emit(ticker)
-        finally:
-            self.close_emitter()
+        while True:
+            await asyncio.sleep(self.interval)
+            self.ticks += 1
 
 
-class TickArchive(UniteIO):
-    async def __call__(self):
-        # Preserve every tick received after this iteration registers.
-        async for ticker in PriceFeed().with_buffer(None):
-            await database.insert_ticker(ticker)
+async def double(value):
+    return value * 2
 
 
-class ExitStrategy(UniteIO):
-    async def __call__(self):
-        # Keep only the latest pending price for TP/SL decisions.
-        async for ticker in PriceFeed().with_buffer(
-            1,
-            overflow=OverflowPolicy.DROP_OLDEST,
-        ):
-            await evaluate_take_profit_and_stop_loss(ticker)
+with Runtime() as rt:
+    clock = rt.start(Clock(0.1))       # starts the thread and loop, returns the same object
+    assert rt["Clock"] is clock and rt[Clock] is clock
 
-
-feed = PriceFeed(websocket=websocket)
-archive = TickArchive()
-strategy = ExitStrategy()
+    # From any thread: coroutines run on the app's loop, callables on the shared executor.
+    assert clock.submit(double, 21).result(timeout=2) == 42
+    assert clock.submit(sum, [1, 2, 3]).result(timeout=2) == 6
+# leaving the block stops every application, then shuts the executor down
 ```
 
-`IterEmitter` can also be used without an `EmitIO` owner. Emission is
-thread-safe, each subscription is bound to its own event loop, and
-`close(wait=True, timeout=...)` can synchronously wait for active subscriber
-buffers to drain. See the
-[emitter guide](https://uniteio.readthedocs.io/en/latest/emitters.html) for live
-subscription semantics, overflow policies, and shutdown behavior.
+- `Runtime.start` runs `__call__` on the application's loop and returns once the
+  loop is running. Several instances of one class need different names:
+  `rt.start(Clock(1), name="slow")`.
+- `App.submit` is how other threads hand work to an application. Inside the
+  loop, use asyncio directly (`await`, `create_task`, `TaskGroup`).
+- Application loops reject non-thread-safe calls (`call_soon`, `create_task`, …)
+  coming from other threads, and blocking on loop work from the loop's own
+  thread raises instead of deadlocking.
 
-## Documentation
-
-The full guide and API reference are available at
-[uniteio.readthedocs.io](https://uniteio.readthedocs.io/en/latest/).
-
-Build the documentation locally with:
-
-```console
-python -m sphinx -W --keep-going -b html docs docs/_build/html
-```
+The [documentation](https://uniteio.readthedocs.io/en/latest/) covers errors,
+shutdown, and the rules for crossing threads.
 
 ## Development
-
-Create or activate an environment, then install the project with development
-dependencies:
 
 ```console
 uv pip install -e ".[dev]"
 python -m pytest
+python -m sphinx -W --keep-going -b html docs docs/_build/html
 ```
 
 Build and validate the release artifacts:

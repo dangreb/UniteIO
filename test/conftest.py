@@ -1,19 +1,12 @@
 import pytest
 
-from uniteio import UIOPool
-from uniteio.uniteio import UIOMeta, UIOPoolMeta, UIOTask
+from uniteio import Runtime
 
 
 @pytest.fixture(autouse=True)
-def clean_uio_state():
-    """Keep singleton applications and executors isolated between tests."""
+def close_default_runtime():
+    """Close the process-wide runtime if a test created it."""
     yield
-
-    pool = UIOPoolMeta._instances.get(UIOPool)
-    if pool is not None:
-        pool.shutdown(cancel_futures=True)
-
-    # These should already be empty after pool shutdown. Clearing them here
-    # also keeps a failed construction from contaminating the next test.
-    UIOMeta._instances.clear()
-    UIOTask._coroarg.clear()
+    if Runtime._default is not None:
+        Runtime._default.close()
+        Runtime._default = None
